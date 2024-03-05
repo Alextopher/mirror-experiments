@@ -8,12 +8,31 @@ pub struct Tree<'a> {
     pub size: usize,
 }
 
-// Node
 #[derive(Debug, Clone)]
 pub struct Node<'a> {
     pub children: Vec<Node<'a>>,
     pub component: &'a str,
     pub data: Metric,
+}
+
+impl<'a> Node<'a> {
+    // Merge 2 nodes
+    pub fn merge(&mut self, other: &Node<'a>) {
+        self.data += other.data;
+
+        let mut other_children = other.children.clone();
+        for child in &mut self.children {
+            if let Some(other_child) = other_children
+                .iter()
+                .find(|c| c.component == child.component)
+            {
+                child.merge(other_child);
+                other_children.retain(|c| c.component != child.component);
+            }
+        }
+
+        self.children.extend(other_children);
+    }
 }
 
 impl<'a> Extend<(&'a Path, Metric)> for Tree<'a> {
@@ -56,7 +75,6 @@ impl<'a> Tree<'a> {
 
             let component_str = component.as_os_str().to_str().unwrap();
 
-            // If there is a matching child, use it
             let mut child_index = None;
             for (i, child) in current.children.iter().enumerate() {
                 if child.component == component_str {
@@ -70,7 +88,6 @@ impl<'a> Tree<'a> {
                 continue;
             }
 
-            // Otherwise, create a new node
             let new_node = Node {
                 children: Vec::new(),
                 data: Metric::default(),
@@ -86,11 +103,17 @@ impl<'a> Tree<'a> {
         current.data += metric;
     }
 
+    // Produces the union of 2 trees
+    pub fn union(&mut self, other: &Tree<'a>) {
+        // Merge the root nodes
+        self.root.merge(&other.root);
+    }
+
     pub fn serialize(&self, writer: &mut impl std::io::Write) -> anyhow::Result<()> {
         let mut stack = vec![(&self.root, PathBuf::new())];
 
         while let Some((node, path)) = stack.pop() {
-            if node.children.is_empty() && node.data.requests > 1 {
+            if node.children.is_empty() {
                 writeln!(
                     writer,
                     "{} {} {} {}",
@@ -102,8 +125,6 @@ impl<'a> Tree<'a> {
                 continue;
             }
 
-            // Sort the children so that the output is deterministic
-            // Because of reference issues we keep an index and sort the indices
             let mut children = node.children.iter().collect::<Vec<_>>();
             children.sort_by_key(|child| child.component);
 
@@ -115,5 +136,31 @@ impl<'a> Tree<'a> {
         }
 
         Ok(())
+    }
+
+    pub fn deserialize(file: &'a str) -> anyhow::Result<Self> {
+        let mut tree = Tree::new();
+
+        file.lines()
+            .filter_map(|l| {
+                let mut parts = l.split_whitespace();
+
+                let path = Path::new(parts.next()?);
+                let requests = parts.next()?.parse().ok()?;
+                let bytes_received = parts.next()?.parse().ok()?;
+                let bytes_sent = parts.next()?.parse().ok()?;
+
+                Some((
+                    path,
+                    Metric {
+                        requests,
+                        bytes_sent,
+                        bytes_received,
+                    },
+                ))
+            })
+            .for_each(|(path, metric)| tree.insert(path, metric));
+
+        Ok(tree)
     }
 }

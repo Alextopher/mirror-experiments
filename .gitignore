@@ -1,0 +1,7 @@
+book/book
+book/src
+
+mirror-metrics/processed
+mirror-metrics/logs
+mirror-metrics/target
+mirror-metrics/merged.txt*

@@ -1,10 +1,11 @@
 mod nginx;
 mod tree;
 
-use flate2::{write::GzEncoder, Compression};
+use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use rayon::prelude::*;
 use std::{
     fs::{read_to_string, File},
+    io::Read,
     time::Instant,
 };
 
@@ -34,7 +35,7 @@ fn process_file(file: &str) -> anyhow::Result<()> {
     let entries = file
         .lines()
         .flat_map(parse_line)
-        .filter(|entry| entry.status < 300 && entry.status >= 200)
+        .filter(|entry| entry.status < 300 && entry.status >= 200 && entry.method == "GET")
         .map(|entry| {
             let LogEntry {
                 path,
@@ -53,15 +54,52 @@ fn process_file(file: &str) -> anyhow::Result<()> {
     let tree = Tree::from_iter(entries);
     println!("Tree creation time: {:?}", Instant::now() - start);
 
-    println!("Tree size: {}", tree.size);
-
     // Serialize
     let start = Instant::now();
     // Write to a file depending on the date of the first log entry
-    let filename = format!("processed/tree-{}.txt.gz", date);
+    let filename = format!("processed/{}.txt.gz", date);
     let mut writer = GzEncoder::new(File::create(filename).unwrap(), Compression::default());
     tree.serialize(&mut writer).unwrap();
     println!("Serialize time: {:?}", Instant::now() - start);
+
+    Ok(())
+}
+
+fn merge(dir: &str) -> anyhow::Result<()> {
+    let files = std::fs::read_dir(dir).unwrap().collect::<Vec<_>>();
+
+    let files = files
+        .into_par_iter()
+        .map(|file| {
+            let file = file.unwrap().path();
+            file.to_str().unwrap().to_string()
+        })
+        // Files start gzip compressed, so we need to decompress them
+        .map(|file| {
+            let file = File::open(file).unwrap();
+            let mut decoder = GzDecoder::new(file);
+            let mut contents = String::new();
+            decoder.read_to_string(&mut contents).unwrap();
+            contents
+        })
+        .collect::<Vec<_>>();
+
+    // Each file gets deserialized into a tree
+    let trees = files
+        .par_iter()
+        .map(|f| Tree::deserialize(f))
+        .collect::<anyhow::Result<Vec<_>>>();
+
+    // Merge all trees into one
+    let mut tree = Tree::new();
+    for t in &trees? {
+        tree.union(t);
+    }
+
+    // Write to a file
+    let filename = "merged.txt.gz".to_string();
+    let mut writer = GzEncoder::new(File::create(filename).unwrap(), Compression::default());
+    tree.serialize(&mut writer).unwrap();
 
     Ok(())
 }
@@ -75,6 +113,12 @@ fn main() {
         let file = file.to_str().unwrap();
         process_file(file).unwrap();
     });
+    println!("Total reduce time: {:?}", Instant::now() - start);
 
-    println!("Total time: {:?}", Instant::now() - start);
+    // Merge all files in processed directory
+    let start = Instant::now();
+    merge("processed").unwrap();
+    println!("Total merge time: {:?}", Instant::now() - start);
+
+    println!("Done!");
 }
